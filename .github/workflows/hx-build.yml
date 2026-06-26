@@ -93,6 +93,10 @@ jobs:
           java_home="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
           sudo ln -sf "$(command -v java)" /usr/local/bin/java.exe
           sudo ln -sf "$(command -v javac)" /usr/local/bin/javac.exe
+          sudo ln -sf "$(command -v jar)" /usr/local/bin/jar.exe
+          sudo ln -sf "$java_home/bin/java" "$java_home/bin/java.exe"
+          sudo ln -sf "$java_home/bin/javac" "$java_home/bin/javac.exe"
+          sudo ln -sf "$java_home/bin/jar" "$java_home/bin/jar.exe"
 
           # HBuilderX 5.12 may not support `cli config set`, so write settings directly.
           settings_dir="$HOME/.local/share/HBuilder X/user"
@@ -136,6 +140,30 @@ jobs:
           echo "HBUILDERX_ROOT=$hbuilderx_root" >> "$GITHUB_ENV"
           echo "HBUILDERX_CLI=$cli_path" >> "$GITHUB_ENV"
           "$cli_path" ver
+
+      - name: Patch HBuilderX Java tools for Linux
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          hx_jdk_bin="$HBUILDERX_ROOT/plugins/amazon-corretto/bin"
+          mkdir -p "$hx_jdk_bin"
+
+          for tool in java javac jar; do
+            system_tool="$(command -v "$tool")"
+            if [[ -z "$system_tool" ]]; then
+              echo "System JDK tool was not found: $tool"
+              exit 1
+            fi
+
+            rm -f "$hx_jdk_bin/$tool" "$hx_jdk_bin/$tool.exe"
+            ln -s "$system_tool" "$hx_jdk_bin/$tool"
+            ln -s "$system_tool" "$hx_jdk_bin/$tool.exe"
+          done
+
+          "$hx_jdk_bin/java" -version
+          "$hx_jdk_bin/javac" -version
+          "$hx_jdk_bin/jar" --version
 
       - name: Patch uts-development-android aapt2 for Linux
         shell: bash
