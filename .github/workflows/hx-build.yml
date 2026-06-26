@@ -1,0 +1,148 @@
+name: HBuilderX macOS ARM Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-hello-uni-app-x:
+    # The downloaded HBuilderX package is arm64, so the runner must be Apple Silicon.
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    env:
+      HBUILDERX_DMG_URL: https://download1.dcloud.net.cn/download/HBuilderX.5.13.2026061207-alpha.arm64.dmg
+      SAMPLE_TARBALL_URL: https://github.com/dcloudio/hello-uni-app-x/archive/refs/heads/alpha.tar.gz
+      PROJECT_PATH: ${{ runner.temp }}/hello-uni-app-x
+
+    steps:
+      - name: Show runner info
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -a
+
+      - name: Download and install HBuilderX Alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dmg_path="$RUNNER_TEMP/HBuilderX-arm64.dmg"
+          mount_point="$RUNNER_TEMP/hbuilderx-dmg"
+
+          curl --fail --location --retry 3 --retry-delay 5 \
+            --output "$dmg_path" \
+            "$HBUILDERX_DMG_URL"
+
+          # Remove quarantine metadata to avoid Gatekeeper dialogs such as
+          # "cannot verify developer" or "app is damaged" on CI runners.
+          xattr -dr com.apple.quarantine "$dmg_path" 2>/dev/null || true
+
+          mkdir -p "$mount_point"
+          hdiutil attach "$dmg_path" -mountpoint "$mount_point" -nobrowse -quiet
+          trap 'hdiutil detach "$mount_point" -quiet || true' EXIT
+
+          app_src="$(find "$mount_point" -maxdepth 1 -type d -name 'HBuilderX*.app' -print -quit)"
+          if [[ -z "$app_src" ]]; then
+            echo "HBuilderX.app was not found in the DMG."
+            find "$mount_point" -maxdepth 2 -print
+            exit 1
+          fi
+
+          app_dst="/Applications/$(basename "$app_src")"
+          sudo rm -rf "$app_dst"
+          sudo ditto "$app_src" "$app_dst"
+          hdiutil detach "$mount_point" -quiet
+          trap - EXIT
+
+          sudo xattr -dr com.apple.quarantine "$app_dst" 2>/dev/null || true
+          sudo chmod +x "$app_dst/Contents/MacOS/cli"
+
+          cli_path="$app_dst/Contents/MacOS/cli"
+          echo "HBUILDERX_APP=$app_dst" >> "$GITHUB_ENV"
+          echo "HBUILDERX_CLI=$cli_path" >> "$GITHUB_ENV"
+
+          "$cli_path" ver
+
+      - name: Download hello-uni-app-x alpha branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tarball="$RUNNER_TEMP/hello-uni-app-x-alpha.tar.gz"
+          mkdir -p "$PROJECT_PATH"
+
+          curl --fail --location --retry 3 --retry-delay 5 \
+            --output "$tarball" \
+            "$SAMPLE_TARBALL_URL"
+
+          tar -xzf "$tarball" -C "$PROJECT_PATH" --strip-components=1
+          test -f "$PROJECT_PATH/manifest.json"
+
+      - name: Compile app-android with HBuilderX CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          open_log="$RUNNER_TEMP/hbuilderx-open.log"
+
+          # Start HBuilderX, but do not let a GUI process block the workflow.
+          python3 - "$HBUILDERX_CLI" "$open_log" <<'PY'
+          import subprocess
+          import sys
+
+          cli, log_path = sys.argv[1], sys.argv[2]
+          with open(log_path, "wb") as log:
+              process = subprocess.Popen(
+                  [cli, "open"],
+                  stdout=log,
+                  stderr=subprocess.STDOUT,
+                  start_new_session=True,
+              )
+              try:
+                  code = process.wait(timeout=90)
+              except subprocess.TimeoutExpired:
+                  print("cli open is still running; continuing without waiting for GUI.")
+                  sys.exit(0)
+              sys.exit(code)
+          PY
+
+          for attempt in {1..60}; do
+            if "$HBUILDERX_CLI" project list >/tmp/hbuilderx-project-list.log 2>&1; then
+              cat /tmp/hbuilderx-project-list.log
+              break
+            fi
+
+            if [[ "$attempt" -eq 60 ]]; then
+              cat "$open_log" || true
+              cat /tmp/hbuilderx-project-list.log || true
+              echo "HBuilderX CLI did not become ready in time."
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          "$HBUILDERX_CLI" project open --path "$PROJECT_PATH"
+
+          # --compile true only compiles project code and --ui false keeps the run in CLI mode.
+          "$HBUILDERX_CLI" launch app-android \
+            --project "$PROJECT_PATH" \
+            --compile true \
+            --ui false
+
+      - name: Quit HBuilderX
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${HBUILDERX_CLI:-}" && -x "$HBUILDERX_CLI" ]]; then
+            "$HBUILDERX_CLI" app quit || true
+          fi
