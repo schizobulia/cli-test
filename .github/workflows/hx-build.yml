@@ -1,4 +1,4 @@
-name: HBuilderX macOS ARM Build
+name: HBuilderX CI Build
 
 on:
   workflow_dispatch:
@@ -183,6 +183,236 @@ jobs:
           if-no-files-found: ignore
 
       - name: Quit HBuilderX
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${HBUILDERX_CLI:-}" && -x "$HBUILDERX_CLI" ]]; then
+            "$HBUILDERX_CLI" app quit || true
+          fi
+
+  build-hello-uni-app-x-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      HBUILDERX_LINUX_URL: https://download1.dcloud.net.cn/download/HBuilderX.5.12.2026060409-alpha.linux_x64.full.tar.gz
+      SAMPLE_TARBALL_URL: https://github.com/dcloudio/hello-uni-app-x/archive/refs/heads/alpha.tar.gz
+      GRADLE_VERSION: "8.7"
+
+    steps:
+      - name: Show runner info
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          lsb_release -a || true
+
+      - name: Install Linux dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+
+          packages=(
+            curl
+            gzip
+            libatk-bridge2.0-0
+            libgbm1
+            libgtk-3-0
+            libnss3
+            libxss1
+            openjdk-17-jdk
+            tar
+            unzip
+          )
+
+          if apt-cache show libasound2t64 >/dev/null 2>&1; then
+            packages+=(libasound2t64)
+          else
+            packages+=(libasound2)
+          fi
+
+          sudo apt-get install -y "${packages[@]}"
+          java -version
+
+      - name: Prepare Android and Gradle paths
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gradle_zip="$RUNNER_TEMP/gradle-${GRADLE_VERSION}-bin.zip"
+          gradle_root="$RUNNER_TEMP/gradle"
+          curl --fail --location --retry 3 --retry-delay 5 \
+            --output "$gradle_zip" \
+            "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+          unzip -q "$gradle_zip" -d "$gradle_root"
+
+          gradle_home="$gradle_root/gradle-${GRADLE_VERSION}"
+          gradle_bin="$gradle_home/bin/gradle"
+          echo "$gradle_home/bin" >> "$GITHUB_PATH"
+          echo "GRADLE_HOME=$gradle_home" >> "$GITHUB_ENV"
+
+          android_home="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          if [[ -x "$android_home/cmdline-tools/latest/bin/sdkmanager" ]]; then
+            yes | "$android_home/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+            "$android_home/cmdline-tools/latest/bin/sdkmanager" \
+              "platform-tools" \
+              "platforms;android-34" \
+              "build-tools;34.0.0"
+          else
+            echo "sdkmanager was not found under $android_home; using existing Android SDK path."
+          fi
+
+          # HBuilderX 5.12 may not support `cli config set`, so write settings directly.
+          settings_dir="$HOME/.local/share/HBuilder X/user"
+          mkdir -p "$settings_dir"
+          cat > "$settings_dir/settings.json" <<EOF
+          {
+            "uts-development-android.gradleHome": "$gradle_bin",
+            "uts-development-android.sdkDir": "$android_home"
+          }
+          EOF
+
+          "$gradle_bin" -v
+          echo "ANDROID_HOME=$android_home" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$android_home" >> "$GITHUB_ENV"
+
+      - name: Download and install HBuilderX Linux Alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tarball="$RUNNER_TEMP/HBuilderX-linux-x64.tar.gz"
+          install_root="$RUNNER_TEMP/hbuilderx-linux"
+          mkdir -p "$install_root"
+
+          curl --fail --location --retry 3 --retry-delay 5 \
+            --output "$tarball" \
+            "$HBUILDERX_LINUX_URL"
+
+          tar -xzf "$tarball" -C "$install_root"
+          cli_path="$(find "$install_root" -type f -name cli -print -quit)"
+          if [[ -z "$cli_path" ]]; then
+            echo "HBuilderX Linux cli was not found after extraction."
+            find "$install_root" -maxdepth 3 -print
+            exit 1
+          fi
+
+          chmod +x "$cli_path"
+          echo "HBUILDERX_CLI=$cli_path" >> "$GITHUB_ENV"
+          "$cli_path" ver
+
+      - name: Download hello-uni-app-x alpha branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tarball="$RUNNER_TEMP/hello-uni-app-x-alpha.tar.gz"
+          project_path="$RUNNER_TEMP/hello-uni-app-x"
+          mkdir -p "$project_path"
+
+          curl --fail --location --retry 3 --retry-delay 5 \
+            --output "$tarball" \
+            "$SAMPLE_TARBALL_URL"
+
+          tar -xzf "$tarball" -C "$project_path" --strip-components=1
+          test -f "$project_path/manifest.json"
+          echo "PROJECT_PATH=$project_path" >> "$GITHUB_ENV"
+
+      - name: Compile app-android with HBuilderX Linux CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          open_log="$RUNNER_TEMP/hbuilderx-linux-open.log"
+
+          python3 - "$HBUILDERX_CLI" "$open_log" <<'PY'
+          import subprocess
+          import sys
+
+          cli, log_path = sys.argv[1], sys.argv[2]
+          with open(log_path, "wb") as log:
+              process = subprocess.Popen(
+                  [cli, "open"],
+                  stdout=log,
+                  stderr=subprocess.STDOUT,
+                  start_new_session=True,
+              )
+              try:
+                  code = process.wait(timeout=90)
+              except subprocess.TimeoutExpired:
+                  print("cli open is still running; continuing after startup timeout.")
+                  sys.exit(0)
+              sys.exit(code)
+          PY
+
+          for attempt in {1..60}; do
+            if "$HBUILDERX_CLI" project list >/tmp/hbuilderx-linux-project-list.log 2>&1; then
+              cat /tmp/hbuilderx-linux-project-list.log
+              break
+            fi
+
+            if [[ "$attempt" -eq 60 ]]; then
+              cat "$open_log" || true
+              cat /tmp/hbuilderx-linux-project-list.log || true
+              echo "HBuilderX Linux CLI did not become ready in time."
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          "$HBUILDERX_CLI" project open --path "$PROJECT_PATH" \
+            2>&1 | tee "$RUNNER_TEMP/hbuilderx-linux-project-open.log"
+
+          compile_marker="$RUNNER_TEMP/hbuilderx-linux-compile-start"
+          launch_log="$RUNNER_TEMP/hbuilderx-linux-launch.log"
+          touch "$compile_marker"
+
+          set +e
+          "$HBUILDERX_CLI" launch app-android \
+            --project "$PROJECT_PATH" \
+            --compile true \
+            --ui false \
+            2>&1 | tee "$launch_log"
+          launch_status="${PIPESTATUS[0]}"
+          set -e
+
+          echo "::group::Recent HBuilderX Linux local logs"
+          found_logs=0
+          for log_root in "$HOME/.local/share/HBuilder X" "$HOME/.config" "$HOME/.cache"; do
+            [[ -d "$log_root" ]] || continue
+
+            while IFS= read -r log_file; do
+              found_logs=1
+              echo "--- $log_file"
+              tail -n 200 "$log_file" || true
+            done < <(
+              find "$log_root" -type f -newer "$compile_marker" -print 2>/dev/null \
+                | grep -Ei 'hbuilderx|dcloud|uni-app|uniapp' \
+                | grep -Ei '\.(log|txt)$' \
+                | head -n 20
+            )
+          done
+
+          if [[ "$found_logs" -eq 0 ]]; then
+            echo "No recent HBuilderX Linux local log files found."
+          fi
+          echo "::endgroup::"
+
+          exit "$launch_status"
+
+      - name: Upload HBuilderX Linux logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hbuilderx-linux-logs
+          path: |
+            ${{ runner.temp }}/hbuilderx-linux-*.log
+          if-no-files-found: ignore
+
+      - name: Quit HBuilderX Linux CLI
         if: always()
         shell: bash
         run: |
