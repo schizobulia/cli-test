@@ -132,13 +132,55 @@ jobs:
             sleep 2
           done
 
-          "$HBUILDERX_CLI" project open --path "$PROJECT_PATH"
+          "$HBUILDERX_CLI" project open --path "$PROJECT_PATH" \
+            2>&1 | tee "$RUNNER_TEMP/hbuilderx-project-open.log"
 
           # --compile true only compiles project code and --ui false keeps the run in CLI mode.
+          compile_marker="$RUNNER_TEMP/hbuilderx-compile-start"
+          launch_log="$RUNNER_TEMP/hbuilderx-launch.log"
+          touch "$compile_marker"
+
+          set +e
           "$HBUILDERX_CLI" launch app-android \
             --project "$PROJECT_PATH" \
             --compile true \
-            --ui false
+            --ui false \
+            2>&1 | tee "$launch_log"
+          launch_status="${PIPESTATUS[0]}"
+          set -e
+
+          echo "::group::Recent HBuilderX local logs"
+          found_logs=0
+          for log_root in "$HOME/Library/Application Support" "$HOME/Library/Logs"; do
+            [[ -d "$log_root" ]] || continue
+
+            while IFS= read -r log_file; do
+              found_logs=1
+              echo "--- $log_file"
+              tail -n 200 "$log_file" || true
+            done < <(
+              find "$log_root" -type f -newer "$compile_marker" -print 2>/dev/null \
+                | grep -Ei 'hbuilderx|dcloud|uni-app|uniapp' \
+                | grep -Ei '\.(log|txt)$' \
+                | head -n 20
+            )
+          done
+
+          if [[ "$found_logs" -eq 0 ]]; then
+            echo "No recent HBuilderX local log files found."
+          fi
+          echo "::endgroup::"
+
+          exit "$launch_status"
+
+      - name: Upload HBuilderX logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hbuilderx-logs
+          path: |
+            ${{ runner.temp }}/hbuilderx-*.log
+          if-no-files-found: ignore
 
       - name: Quit HBuilderX
         if: always()
