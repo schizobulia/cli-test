@@ -7,7 +7,7 @@
 
 hbuilderx下载地址: https://download1.dcloud.net.cn/download/HBuilderX.5.13.2026061207-alpha.arm64.dmg
 
-示例项目下载地址(尽可能快速下载alpha分支，不需要git clone全部): https://github.com/dcloudio/hello-uni-app-x
+示例项目路径: D:/tmp/test-unix（已并入当前仓库的 test-unix/ 目录，CI 使用该目录编译）
 
 hbuilderx cli 参考文档：https://hx.dcloud.net.cn/cli/README
 

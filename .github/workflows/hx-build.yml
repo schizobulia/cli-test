@@ -12,13 +12,12 @@ permissions:
   contents: read
 
 jobs:
-  build-hello-uni-app-x-linux:
+  build-test-unix-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
     env:
       HBUILDERX_LINUX_URL: https://download1.dcloud.net.cn/download/HBuilderX.5.12.2026060409-alpha.linux_x64.full.tar.gz
-      SAMPLE_TARBALL_URL: https://github.com/dcloudio/hello-uni-app-x/archive/refs/heads/alpha.tar.gz
       DART_SASS_PLUGIN_ZIP: .github/hbuilderx-plugins/compile-dart-sass_0.0.3.zip
       GRADLE_VERSION: "8.7"
 
@@ -224,20 +223,12 @@ jobs:
           test -f "$plugin_dir/package.json"
           echo "Installed compile-dart-sass plugin to $plugin_dir"
 
-      - name: Download hello-uni-app-x alpha branch
+      - name: Use checked-out test-unix project
         shell: bash
         run: |
           set -euo pipefail
 
-          tarball="$RUNNER_TEMP/hello-uni-app-x-alpha.tar.gz"
-          project_path="$RUNNER_TEMP/hello-uni-app-x"
-          mkdir -p "$project_path"
-
-          curl --fail --location --retry 3 --retry-delay 5 \
-            --output "$tarball" \
-            "$SAMPLE_TARBALL_URL"
-
-          tar -xzf "$tarball" -C "$project_path" --strip-components=1
+          project_path="$GITHUB_WORKSPACE/test-unix"
           test -f "$project_path/manifest.json"
           echo "PROJECT_PATH=$project_path" >> "$GITHUB_ENV"
 
