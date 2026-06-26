@@ -197,9 +197,13 @@ jobs:
     env:
       HBUILDERX_LINUX_URL: https://download1.dcloud.net.cn/download/HBuilderX.5.12.2026060409-alpha.linux_x64.full.tar.gz
       SAMPLE_TARBALL_URL: https://github.com/dcloudio/hello-uni-app-x/archive/refs/heads/alpha.tar.gz
+      DART_SASS_PLUGIN_ZIP: .github/hbuilderx-plugins/compile-dart-sass_0.0.3.zip
       GRADLE_VERSION: "8.7"
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Show runner info
         shell: bash
         run: |
@@ -300,8 +304,42 @@ jobs:
           fi
 
           chmod +x "$cli_path"
+          hbuilderx_root="$(dirname "$cli_path")"
+          echo "HBUILDERX_ROOT=$hbuilderx_root" >> "$GITHUB_ENV"
           echo "HBUILDERX_CLI=$cli_path" >> "$GITHUB_ENV"
           "$cli_path" ver
+
+      - name: Install compile-dart-sass plugin
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          plugin_zip="$GITHUB_WORKSPACE/$DART_SASS_PLUGIN_ZIP"
+          plugin_dir="$HBUILDERX_ROOT/plugins/compile-dart-sass"
+
+          if [[ ! -f "$plugin_zip" ]]; then
+            echo "Plugin zip was not found: $plugin_zip"
+            exit 1
+          fi
+
+          rm -rf "$plugin_dir"
+          mkdir -p "$plugin_dir"
+          unzip -q "$plugin_zip" -d "$plugin_dir"
+
+          # Some marketplace plugins require dependencies to be installed after unzip.
+          if [[ -f "$plugin_dir/package.json" && ! -d "$plugin_dir/node_modules" ]]; then
+            cd "$plugin_dir"
+            if [[ -x "$HBUILDERX_ROOT/plugins/npm/npm" ]]; then
+              "$HBUILDERX_ROOT/plugins/npm/npm" install
+            elif [[ -x "$HBUILDERX_ROOT/npm/npm" ]]; then
+              "$HBUILDERX_ROOT/npm/npm" install
+            else
+              npm install
+            fi
+          fi
+
+          test -f "$plugin_dir/package.json"
+          echo "Installed compile-dart-sass plugin to $plugin_dir"
 
       - name: Download hello-uni-app-x alpha branch
         shell: bash
