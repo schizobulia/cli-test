@@ -12,184 +12,6 @@ permissions:
   contents: read
 
 jobs:
-  build-hello-uni-app-x:
-    # The downloaded HBuilderX package is arm64, so the runner must be Apple Silicon.
-    runs-on: macos-15
-    timeout-minutes: 60
-
-    env:
-      HBUILDERX_DMG_URL: https://download1.dcloud.net.cn/download/HBuilderX.5.13.2026061207-alpha.arm64.dmg
-      SAMPLE_TARBALL_URL: https://github.com/dcloudio/hello-uni-app-x/archive/refs/heads/alpha.tar.gz
-
-    steps:
-      - name: Show runner info
-        shell: bash
-        run: |
-          set -euo pipefail
-          sw_vers
-          uname -a
-
-      - name: Download and install HBuilderX Alpha
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          dmg_path="$RUNNER_TEMP/HBuilderX-arm64.dmg"
-          mount_point="$RUNNER_TEMP/hbuilderx-dmg"
-
-          curl --fail --location --retry 3 --retry-delay 5 \
-            --output "$dmg_path" \
-            "$HBUILDERX_DMG_URL"
-
-          # Remove quarantine metadata to avoid Gatekeeper dialogs such as
-          # "cannot verify developer" or "app is damaged" on CI runners.
-          xattr -dr com.apple.quarantine "$dmg_path" 2>/dev/null || true
-
-          mkdir -p "$mount_point"
-          hdiutil attach "$dmg_path" -mountpoint "$mount_point" -nobrowse -quiet
-          trap 'hdiutil detach "$mount_point" -quiet || true' EXIT
-
-          app_src="$(find "$mount_point" -maxdepth 1 -type d -name 'HBuilderX*.app' -print -quit)"
-          if [[ -z "$app_src" ]]; then
-            echo "HBuilderX.app was not found in the DMG."
-            find "$mount_point" -maxdepth 2 -print
-            exit 1
-          fi
-
-          app_dst="/Applications/$(basename "$app_src")"
-          sudo rm -rf "$app_dst"
-          sudo ditto "$app_src" "$app_dst"
-          hdiutil detach "$mount_point" -quiet
-          trap - EXIT
-
-          sudo xattr -dr com.apple.quarantine "$app_dst" 2>/dev/null || true
-          sudo chmod +x "$app_dst/Contents/MacOS/cli"
-
-          cli_path="$app_dst/Contents/MacOS/cli"
-          echo "HBUILDERX_APP=$app_dst" >> "$GITHUB_ENV"
-          echo "HBUILDERX_CLI=$cli_path" >> "$GITHUB_ENV"
-
-          "$cli_path" ver
-
-      - name: Download hello-uni-app-x alpha branch
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          tarball="$RUNNER_TEMP/hello-uni-app-x-alpha.tar.gz"
-          project_path="$RUNNER_TEMP/hello-uni-app-x"
-          mkdir -p "$project_path"
-
-          curl --fail --location --retry 3 --retry-delay 5 \
-            --output "$tarball" \
-            "$SAMPLE_TARBALL_URL"
-
-          tar -xzf "$tarball" -C "$project_path" --strip-components=1
-          test -f "$project_path/manifest.json"
-          echo "PROJECT_PATH=$project_path" >> "$GITHUB_ENV"
-
-      - name: Compile app-android with HBuilderX CLI
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          open_log="$RUNNER_TEMP/hbuilderx-open.log"
-
-          # Start HBuilderX, but do not let a GUI process block the workflow.
-          python3 - "$HBUILDERX_CLI" "$open_log" <<'PY'
-          import subprocess
-          import sys
-
-          cli, log_path = sys.argv[1], sys.argv[2]
-          with open(log_path, "wb") as log:
-              process = subprocess.Popen(
-                  [cli, "open"],
-                  stdout=log,
-                  stderr=subprocess.STDOUT,
-                  start_new_session=True,
-              )
-              try:
-                  code = process.wait(timeout=90)
-              except subprocess.TimeoutExpired:
-                  print("cli open is still running; continuing without waiting for GUI.")
-                  sys.exit(0)
-              sys.exit(code)
-          PY
-
-          for attempt in {1..60}; do
-            if "$HBUILDERX_CLI" project list >/tmp/hbuilderx-project-list.log 2>&1; then
-              cat /tmp/hbuilderx-project-list.log
-              break
-            fi
-
-            if [[ "$attempt" -eq 60 ]]; then
-              cat "$open_log" || true
-              cat /tmp/hbuilderx-project-list.log || true
-              echo "HBuilderX CLI did not become ready in time."
-              exit 1
-            fi
-
-            sleep 2
-          done
-
-          "$HBUILDERX_CLI" project open --path "$PROJECT_PATH" \
-            2>&1 | tee "$RUNNER_TEMP/hbuilderx-project-open.log"
-
-          # --compile true only compiles project code and --ui false keeps the run in CLI mode.
-          compile_marker="$RUNNER_TEMP/hbuilderx-compile-start"
-          launch_log="$RUNNER_TEMP/hbuilderx-launch.log"
-          touch "$compile_marker"
-
-          set +e
-          "$HBUILDERX_CLI" launch app-android \
-            --project "$PROJECT_PATH" \
-            --compile true \
-            --ui false \
-            2>&1 | tee "$launch_log"
-          launch_status="${PIPESTATUS[0]}"
-          set -e
-
-          echo "::group::Recent HBuilderX local logs"
-          found_logs=0
-          for log_root in "$HOME/Library/Application Support" "$HOME/Library/Logs"; do
-            [[ -d "$log_root" ]] || continue
-
-            while IFS= read -r log_file; do
-              found_logs=1
-              echo "--- $log_file"
-              tail -n 200 "$log_file" || true
-            done < <(
-              find "$log_root" -type f -newer "$compile_marker" -print 2>/dev/null \
-                | grep -Ei 'hbuilderx|dcloud|uni-app|uniapp' \
-                | grep -Ei '\.(log|txt)$' \
-                | head -n 20
-            )
-          done
-
-          if [[ "$found_logs" -eq 0 ]]; then
-            echo "No recent HBuilderX local log files found."
-          fi
-          echo "::endgroup::"
-
-          exit "$launch_status"
-
-      - name: Upload HBuilderX logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: hbuilderx-logs
-          path: |
-            ${{ runner.temp }}/hbuilderx-*.log
-          if-no-files-found: ignore
-
-      - name: Quit HBuilderX
-        if: always()
-        shell: bash
-        run: |
-          if [[ -n "${HBUILDERX_CLI:-}" && -x "$HBUILDERX_CLI" ]]; then
-            "$HBUILDERX_CLI" app quit || true
-          fi
-
   build-hello-uni-app-x-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -268,19 +90,25 @@ jobs:
             echo "sdkmanager was not found under $android_home; using existing Android SDK path."
           fi
 
+          java_home="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          sudo ln -sf "$(command -v java)" /usr/local/bin/java.exe
+          sudo ln -sf "$(command -v javac)" /usr/local/bin/javac.exe
+
           # HBuilderX 5.12 may not support `cli config set`, so write settings directly.
           settings_dir="$HOME/.local/share/HBuilder X/user"
           mkdir -p "$settings_dir"
           cat > "$settings_dir/settings.json" <<EOF
           {
             "uts-development-android.gradleHome": "$gradle_bin",
-            "uts-development-android.sdkDir": "$android_home"
+            "uts-development-android.sdkDir": "$android_home",
+            "uts-development-android.javaHome": "$java_home"
           }
           EOF
 
           "$gradle_bin" -v
           echo "ANDROID_HOME=$android_home" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$android_home" >> "$GITHUB_ENV"
+          echo "JAVA_HOME=$java_home" >> "$GITHUB_ENV"
 
       - name: Download and install HBuilderX Linux Alpha
         shell: bash
@@ -308,6 +136,33 @@ jobs:
           echo "HBUILDERX_ROOT=$hbuilderx_root" >> "$GITHUB_ENV"
           echo "HBUILDERX_CLI=$cli_path" >> "$GITHUB_ENV"
           "$cli_path" ver
+
+      - name: Patch uts-development-android aapt2 for Linux
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sdk_aapt2="$(find "$ANDROID_HOME/build-tools" -path '*/aapt2' -type f | sort -V | tail -n 1)"
+          plugin_aapt2="$HBUILDERX_ROOT/plugins/uts-development-android/static/macosx/aapt2"
+
+          if [[ -z "$sdk_aapt2" || ! -x "$sdk_aapt2" ]]; then
+            echo "Linux aapt2 was not found under $ANDROID_HOME/build-tools."
+            find "$ANDROID_HOME/build-tools" -name aapt2 -type f -print || true
+            exit 1
+          fi
+
+          if [[ ! -f "$plugin_aapt2" ]]; then
+            echo "Plugin aapt2 path was not found: $plugin_aapt2"
+            find "$HBUILDERX_ROOT/plugins/uts-development-android" -path '*aapt2*' -print || true
+            exit 1
+          fi
+
+          cp "$sdk_aapt2" "$plugin_aapt2"
+          chmod +x "$plugin_aapt2"
+
+          echo "Patched uts-development-android aapt2 with: $sdk_aapt2"
+          file "$plugin_aapt2"
+          "$plugin_aapt2" version || true
 
       - name: Install compile-dart-sass plugin
         shell: bash
